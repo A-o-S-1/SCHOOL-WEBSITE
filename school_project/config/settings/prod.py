@@ -29,15 +29,18 @@ ALLOWED_HOSTS = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
 import urllib.parse as _urlparse
 
 _db_url = _urlparse.urlparse(os.environ["DATABASE_URL"])
+_db_query = _urlparse.parse_qs(_db_url.query)
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": _db_url.path.lstrip("/"),
-        "USER": _db_url.username,
-        "PASSWORD": _db_url.password,
+        "NAME": _urlparse.unquote(_db_url.path.lstrip("/")),
+        "USER": _urlparse.unquote(_db_url.username or ""),
+        "PASSWORD": _urlparse.unquote(_db_url.password or ""),
         "HOST": _db_url.hostname,
         "PORT": _db_url.port or 5432,
         "CONN_MAX_AGE": 60,
+        # Supabase PostgreSQL requires TLS for production connections.
+        "OPTIONS": {"sslmode": _db_query.get("sslmode", ["require"])[0]},
     }
 }
 
