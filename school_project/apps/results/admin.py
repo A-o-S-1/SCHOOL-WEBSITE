@@ -12,10 +12,7 @@ from .models import (
     GradeBand,
     PsychomotorRating,
     PsychomotorSkill,
-    ResultCheckLog,
     ResultEntry,
-    ScratchCard,
-    ScratchCardBatch,
     SessionResult,
     Student,
     Term,
@@ -168,42 +165,6 @@ class TermResultAdmin(admin.ModelAdmin):
             messages.SUCCESS,
         )
     recalculate_positions.short_description = "Recalculate positions & class averages (whole class)"
-
-@admin.register(ScratchCardBatch)
-class ScratchCardBatchAdmin(admin.ModelAdmin):
-    list_display = ("label", "quantity", "price", "created_at", "cards_link")
-
-    def cards_link(self, obj):
-        url = reverse("admin:results_scratchcard_changelist") + f"?batch__id__exact={obj.id}"
-        return format_html('<a href="{}">View {} cards</a>', url, obj.quantity)
-    cards_link.short_description = "Cards"
-
-
-@admin.register(ScratchCard)
-class ScratchCardAdmin(admin.ModelAdmin):
-    list_display = ("serial_number", "pin", "batch", "is_used", "used_at", "used_for_student")
-    list_filter = ("is_used", "batch")
-    search_fields = ("serial_number", "pin")
-    actions = ["reactivate_cards"]
-
-    def reactivate_cards(self, request, queryset):
-        """Matches 'Activate Supplementary Scratch Card' — for a legitimate
-        re-check (e.g. a parent needs to view the result again)."""
-        updated = queryset.update(is_used=False, used_at=None, used_for_student=None)
-        self.message_user(request, f"Reactivated {updated} card(s).", messages.SUCCESS)
-    reactivate_cards.short_description = "Reactivate selected cards (allow re-use)"
-
-
-@admin.register(ResultCheckLog)
-class ResultCheckLogAdmin(admin.ModelAdmin):
-    list_display = ("admission_number_attempted", "ip_address", "was_successful", "attempted_at")
-    list_filter = ("was_successful",)
-    search_fields = ("admission_number_attempted", "ip_address")
-    date_hierarchy = "attempted_at"
-
-    def has_add_permission(self, request):
-        return False  # logs are system-generated only, never hand-created
-
 
 @admin.register(SessionResult)
 class SessionResultAdmin(admin.ModelAdmin):

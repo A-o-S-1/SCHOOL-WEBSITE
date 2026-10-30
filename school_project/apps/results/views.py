@@ -1,165 +1,21 @@
 import csv
 import io
-from datetime import timedelta
 
 import openpyxl
 from django.contrib.admin.views.decorators import staff_member_required
+from django.db import transaction
 from django.shortcuts import redirect, render
 from django.urls import reverse
-from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
-from django.views.generic import FormView
 
 from . import services
-from .forms import MasterSheetForm, PromotionResultForm, ResultLookupForm, ScoreCSVUploadForm, WorkbookUploadForm
+from .forms import MasterSheetForm, PromotionResultForm, ScoreCSVUploadForm, WorkbookUploadForm
 from .models import (
-    AcademicSession, ClassRoom, ResultCheckLog, ResultEntry, PsychomotorRating,
-    ScratchCard, SessionResult, Student, Term, TermResult,
+    AcademicSession, ClassRoom, ResultEntry, PsychomotorRating,
+    SessionResult, Student, Term, TermResult,
 )
 from apps.academics.models import Subject
-
-# How many failed attempts from one IP within the window before we block
-# further tries. Deliberately generous enough not to lock out a parent who
-# fat-fingers a PIN twice, strict enough to make brute-forcing impractical.
-RATE_LIMIT_MAX_ATTEMPTS = 5
-RATE_LIMIT_WINDOW_MINUTES = 15
-
-# How long a successful lookup stays viewable before the parent has to
-# check again with the (now-used-up) card. Short enough that a result
-# left open on a shared/library computer doesn't stay exposed for long.
-SESSION_UNLOCK_MINUTES = 15
-
-SESSION_KEY = "unlocked_term_result_id"
-SESSION_KEY_EXPIRES = "unlocked_term_result_expires"
-
-
-def _client_ip(request):
-    """
-    Best-effort real client IP behind a reverse proxy. Checked against
-    X-Forwarded-For first (set by Nginx/the hosting platform in production),
-    falling back to REMOTE_ADDR for local development.
-    """
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "0.0.0.0")
-
-
-def _is_rate_limited(ip_address):
-    window_start = timezone.now() - timedelta(minutes=RATE_LIMIT_WINDOW_MINUTES)
-    recent_failed = ResultCheckLog.objects.filter(
-        ip_address=ip_address, was_successful=False, attempted_at__gte=window_start
-    ).count()
-    return recent_failed >= RATE_LIMIT_MAX_ATTEMPTS
-
-
-class ResultLookupView(FormView):
-    """
-    Public result lookup: Admission Number + Term + Scratch Card PIN + Serial.
-
-    Security properties (see also the module-level constants above):
-    - Every attempt is logged (ResultCheckLog), success or failure.
-    - Failures never reveal WHICH field was wrong — same generic message
-      whether the admission number doesn't exist, the PIN is wrong, the
-      card was already used, or the result simply isn't published yet.
-      Distinguishing these would let an attacker enumerate valid admission
-      numbers or valid-but-unused PINs one field at a time.
-    - IP-based rate limiting via the same log table — no new dependency.
-    - On success, the card is immediately marked used (single-use) and the
-      result becomes viewable only through a time-limited session flag,
-      not a bookmarkable/guessable URL.
-    """
-    template_name = "results/lookup.html"
-    form_class = ResultLookupForm
-
-    def form_valid(self, form):
-        ip_address = _client_ip(self.request)
-        admission_number = form.cleaned_data["admission_number"]
-
-        if _is_rate_limited(ip_address):
-            form.add_error(None, "Too many attempts. Please wait 15 minutes before trying again.")
-            return self.render_to_response(self.get_context_data(form=form))
-
-        term = Term.objects.filter(pk=form.cleaned_data["term"]).first()
-        student = Student.objects.filter(admission_number__iexact=admission_number, is_active=True).first()
-        card = ScratchCard.objects.filter(
-            serial_number__iexact=form.cleaned_data["serial_number"],
-            pin=form.cleaned_data["pin"],
-            is_used=False,
-        ).first()
-
-        term_result = None
-        if student and term:
-            term_result = TermResult.objects.filter(student=student, term=term).first()
-
-        success = bool(student and term and card and term_result and term_result.is_publicly_visible)
-
-        ResultCheckLog.objects.create(
-            admission_number_attempted=admission_number, ip_address=ip_address, was_successful=success
-        )
-
-        if not success:
-            form.add_error(
-                None,
-                "We couldn't find a result matching those details. Please double-check your admission "
-                "number, term, PIN, and serial number, or confirm the result has been published.",
-            )
-            return self.render_to_response(self.get_context_data(form=form))
-
-        card.mark_used(student)
-        self.request.session[SESSION_KEY] = term_result.id
-        self.request.session[SESSION_KEY_EXPIRES] = (
-            timezone.now() + timedelta(minutes=SESSION_UNLOCK_MINUTES)
-        ).isoformat()
-        return redirect(reverse("results:view_result"))
-
-
-class ResultDetailView(View):
-    """
-    Displays the unlocked result — reachable only via a valid session flag
-    set by ResultLookupView, never by a direct/guessable URL. Session flag
-    is time-limited and single-use per successful card check.
-    """
-    template_name = "results/result_detail.html"
-
-    def get(self, request):
-        term_result_id = request.session.get(SESSION_KEY)
-        expires_at = request.session.get(SESSION_KEY_EXPIRES)
-
-        if not term_result_id or not expires_at or timezone.now().isoformat() > expires_at:
-            request.session.pop(SESSION_KEY, None)
-            request.session.pop(SESSION_KEY_EXPIRES, None)
-            return redirect(reverse("results:check"))
-
-        term_result = TermResult.objects.filter(pk=term_result_id, is_published=True, is_blocked=False).first()
-        if not term_result:
-            return redirect(reverse("results:check"))
-
-        result_entries = ResultEntry.objects.filter(
-            student=term_result.student, term=term_result.term
-        ).select_related("subject")
-        psychomotor_ratings = PsychomotorRating.objects.filter(
-            student=term_result.student, term=term_result.term
-        ).select_related("skill")
-
-        return render(request, self.template_name, {
-            "term_result": term_result,
-            "student": term_result.student,
-            "result_entries": result_entries,
-            "psychomotor_ratings": psychomotor_ratings,
-        })
-
-
-class ResultLogoutView(View):
-    """Lets the parent explicitly clear the unlocked result before the
-    session naturally expires — e.g. on a shared computer."""
-
-    def get(self, request):
-        request.session.pop(SESSION_KEY, None)
-        request.session.pop(SESSION_KEY_EXPIRES, None)
-        return redirect(reverse("results:check"))
-
 
 # ==============================================================================
 # Staff-only tools: CSV score upload, position recalculation, master sheets
@@ -495,53 +351,129 @@ class WorkbookUploadView(View):
 
     # ------------------------------------------------------------------
     def _process_term_sheet(self, ws, term_key, session, classroom, summary):
-        """Parses one term sheet (e.g. '1ST TERM'): writes ResultEntry rows
-        for every subject column that has an actual score, skipping blanks."""
+        """Import one term using cached lookups and batched score writes."""
+        from decimal import Decimal, InvalidOperation
+
         errors = []
         term, _ = Term.objects.get_or_create(session=session, name=term_key)
         level = self._level_code(classroom.name)
 
-        # Row 3 holds subject names (merged across each 4-column block),
-        # row 4 holds CA/Exam/Total/Grade sub-headers, data starts row 5.
+        # Resolve each subject header once, rather than querying for every row.
         header_row = [cell.value for cell in ws[3]]
-        subject_columns = []  # (subject, ca_col_index)
+        subject_columns = []
         col = SUBJECT_BLOCK_START_COL
+        stop_headers = {"OVERALL TOTAL", "SUBJECT EVALUATED", "SUBJECT OFFERED", "AVERAGE", "POSITION"}
         while col < len(header_row) and header_row[col]:
-            header_text = header_row[col]
-            if header_text in ("Overall Total", "Subject Evaluated", "Subject Offered", "Average", "Position"):
+            header_text = str(header_row[col]).strip()
+            if header_text.upper() in stop_headers:
                 break
             subject = services.resolve_subject(header_text, level)
-            if not subject:
+            if subject is None:
                 errors.append(f"{term.get_name_display()}: unrecognized subject column '{header_text}' — skipped.")
             else:
                 subject_columns.append((subject, col))
             col += SUBJECT_BLOCK_WIDTH
 
-        touched_students = set()
-        for row in ws.iter_rows(min_row=5, values_only=True):
-            admission_number = (str(row[0]).strip() if row[0] else "")
-            if not admission_number:
+        # Load students once; admission numbers are matched case-insensitively.
+        students_by_admission = {
+            s.admission_number.casefold(): s
+            for s in Student.objects.all()
+        }
+        # Keep support for previously registered students whose current class
+        # may not have been synchronized yet, without one query per workbook row.
+        admission_values = set()
+        parsed_rows = []
+        for row_number, row in enumerate(ws.iter_rows(min_row=5, values_only=True), start=5):
+            admission = str(row[0]).strip() if row and row[0] else ""
+            if not admission:
                 continue
-            student = Student.objects.filter(admission_number__iexact=admission_number).first()
+            admission_values.add(admission.casefold())
+            parsed_rows.append((row_number, admission, row))
+
+        # Validate and collect changes before touching result rows.
+        pending = {}
+        touched_student_ids = set()
+        for row_number, admission, row in parsed_rows:
+            student = students_by_admission.get(admission.casefold())
             if not student:
-                errors.append(f"{term.get_name_display()}: no student '{admission_number}' — run REGISTER import first.")
+                errors.append(f"{term.get_name_display()}: no student '{admission}' on row {row_number} — run REGISTER import first.")
                 continue
-
             for subject, ca_col in subject_columns:
-                ca_score, exam_score = row[ca_col], row[ca_col + 1]
-                if ca_score is None and exam_score is None:
-                    continue  # subject not yet evaluated for this student — leave it out, not zero
-                ResultEntry.objects.update_or_create(
-                    student=student, term=term, subject=subject,
-                    defaults={"ca_score": ca_score or 0, "exam_score": exam_score or 0},
+                ca_raw = row[ca_col] if ca_col < len(row) else None
+                exam_raw = row[ca_col + 1] if ca_col + 1 < len(row) else None
+                if ca_raw is None and exam_raw is None:
+                    continue
+                try:
+                    ca = Decimal(str(ca_raw or 0))
+                    exam = Decimal(str(exam_raw or 0))
+                except (InvalidOperation, TypeError, ValueError):
+                    errors.append(f"{term.get_name_display()}: invalid score for {admission}, {subject.name} — skipped.")
+                    continue
+                if ca < 0 or ca > 30 or exam < 0 or exam > 70:
+                    errors.append(f"{term.get_name_display()}: {admission}, {subject.name}: CA must be 0–30 and exam 0–70 — skipped.")
+                    continue
+                pending[(student.id, subject.id)] = (student, subject, ca, exam)
+                touched_student_ids.add(student.id)
+
+        if not pending:
+            return errors
+
+        student_ids = list(touched_student_ids)
+        subject_ids = list({key[1] for key in pending})
+        with transaction.atomic():
+            existing = {
+                (entry.student_id, entry.subject_id): entry
+                for entry in ResultEntry.objects.filter(
+                    term=term, student_id__in=student_ids, subject_id__in=subject_ids
                 )
-                summary["scores_written"] += 1
-            touched_students.add(student.id)
+            }
+            to_create, to_update = [], []
+            for key, (student, subject, ca, exam) in pending.items():
+                entry = existing.get(key)
+                if entry:
+                    entry.ca_score = ca
+                    entry.exam_score = exam
+                    to_update.append(entry)
+                else:
+                    to_create.append(ResultEntry(
+                        student=student, term=term, subject=subject,
+                        ca_score=ca, exam_score=exam,
+                    ))
+            if to_create:
+                ResultEntry.objects.bulk_create(to_create, batch_size=500)
+            if to_update:
+                ResultEntry.objects.bulk_update(to_update, ["ca_score", "exam_score"], batch_size=500)
+            summary["scores_written"] += len(pending)
 
-        for student_id in touched_students:
-            services.recalculate_term_result_totals(Student.objects.get(pk=student_id), term)
+            # Recompute totals in memory from one query, preserving publication
+            # and blocking flags on existing TermResult rows.
+            from collections import defaultdict
+            totals = defaultdict(lambda: [Decimal("0"), 0])
+            for entry in ResultEntry.objects.filter(term=term, student_id__in=student_ids):
+                totals[entry.student_id][0] += (entry.ca_score or 0) + (entry.exam_score or 0)
+                totals[entry.student_id][1] += 1
+            current_results = {
+                tr.student_id: tr for tr in TermResult.objects.filter(term=term, student_id__in=student_ids)
+            }
+            new_results, changed_results = [], []
+            for student_id in student_ids:
+                total, count = totals[student_id]
+                average = round(total / count, 1) if count else None
+                result = current_results.get(student_id)
+                if result:
+                    result.overall_total = total
+                    result.average = average
+                    changed_results.append(result)
+                else:
+                    new_results.append(TermResult(
+                        student_id=student_id, term=term, overall_total=total, average=average
+                    ))
+            if new_results:
+                TermResult.objects.bulk_create(new_results, batch_size=500)
+            if changed_results:
+                TermResult.objects.bulk_update(changed_results, ["overall_total", "average"], batch_size=500)
+
         services.recalculate_positions_for_term(term)
-
         return errors
 
     # ------------------------------------------------------------------

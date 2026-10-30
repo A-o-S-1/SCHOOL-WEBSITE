@@ -1,9 +1,8 @@
 """
 Seeds the Result Portal with a working academic calendar, the grading
 scale read off the school's real report card, standard psychomotor/social
-behaviour skills, a handful of clearly-fictional demo students, and one
-active scratch card per demo student so the public lookup flow can be
-tested end-to-end.
+behaviour skills, and a handful of clearly-fictional demo students and
+results for staff testing.
 
 Design decision: demo student names are entirely fictional — the actual
 report card sample we were given showed a real student's name, and that
@@ -26,8 +25,6 @@ from apps.results.models import (
     PsychomotorRating,
     PsychomotorSkill,
     ResultEntry,
-    ScratchCard,
-    ScratchCardBatch,
     Student,
     Term,
     TermResult,
@@ -45,7 +42,6 @@ class Command(BaseCommand):
         self.seed_classrooms()
         students = self.seed_students()
         self.seed_results(students)
-        self.seed_scratch_cards(students)
         self.stdout.write(self.style.SUCCESS("Result Portal demo data seeded successfully."))
 
     # ----------------------------------------------------------------
@@ -200,21 +196,3 @@ class Command(BaseCommand):
         # admin action and CSV upload use — also fills in per-subject
         # position/class-average, which this seed script never computed before.
         services.recalculate_positions_for_term(term)
-
-    def seed_scratch_cards(self, students):
-        batch, _ = ScratchCardBatch.objects.get_or_create(
-            label="Demo Batch — First Term 2025/2026",
-            defaults={"quantity": len(students), "price": 200},
-        )
-        self.stdout.write(self.style.WARNING("Demo scratch card PINs (for testing the public lookup only):"))
-        for student in students:
-            # Deterministic serial (derived from admission number) rather than
-            # the model's random default — this is the only way to reliably
-            # find "this demo student's card" on a second run without adding
-            # a field just for seed-script bookkeeping. Real cards generated
-            # via the admin still get fully random serials as normal.
-            demo_serial = "MDS-DEMO-" + student.admission_number.replace("/", "")
-            card, _ = ScratchCard.objects.get_or_create(
-                serial_number=demo_serial, defaults={"batch": batch}
-            )
-            self.stdout.write(f"  {student.admission_number} ({student.full_name}) -> PIN {card.pin} / Serial {card.serial_number}")

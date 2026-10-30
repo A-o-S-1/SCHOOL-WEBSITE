@@ -3,8 +3,9 @@ Result Portal models.
 
 Split across this file for readability, in the order a result actually
 gets built: calendar (session/term) -> people (classroom/student) ->
-grading rules -> the result itself -> access control (scratch cards) ->
-audit logging.
+grading rules -> the result itself. Legacy scratch-card and lookup-log
+records remain in the schema for deployed-data compatibility; staff login
+is now the only result-access path.
 """
 import secrets
 import string
@@ -126,7 +127,7 @@ class ClassRoom(models.Model):
 
 class Student(models.Model):
     """A student record. `admission_number` is the primary public identifier
-    used together with a scratch card PIN to look up results."""
+    staff use to locate the student's records."""
 
     GENDER_CHOICES = [("M", "Male"), ("F", "Female")]
 
@@ -334,7 +335,8 @@ class TermResult(models.Model):
 
 
 # ==============================================================================
-# Access control — scratch cards
+# Legacy scratch-card records. Kept for deployed-data compatibility only;
+# result access is now restricted to authenticated staff accounts.
 # ==============================================================================
 def generate_pin():
     """12-digit numeric PIN — matches the WAEC/NECO-style scratch card format
