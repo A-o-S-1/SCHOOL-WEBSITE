@@ -647,7 +647,9 @@ class StaffResultPrintView(View):
     def get(self, request, student_id, term_id):
         student = get_object_or_404(Student, pk=student_id)
         term = get_object_or_404(Term, pk=term_id)
-        term_result = get_object_or_404(TermResult, student=student, term=term, is_blocked=False)
+        term_result = get_object_or_404(
+            TermResult, student=student, term=term, is_published=True, is_blocked=False
+        )
         result_entries = ResultEntry.objects.filter(student=student, term=term).select_related("subject")
         psychomotor_ratings = PsychomotorRating.objects.filter(
             student=student, term=term
@@ -687,11 +689,14 @@ class StaffClassResultsPrintView(View):
         students = classroom.students.filter(
             is_active=True,
             term_results__term=term,
+            term_results__is_published=True,
             term_results__is_blocked=False,
         ).distinct().order_by("last_name", "first_name").prefetch_related(
             Prefetch(
                 "term_results",
-                queryset=TermResult.objects.filter(term=term, is_blocked=False),
+                queryset=TermResult.objects.filter(
+                    term=term, is_published=True, is_blocked=False
+                ),
                 to_attr="selected_term_results",
             ),
             Prefetch(

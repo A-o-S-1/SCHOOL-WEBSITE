@@ -54,6 +54,14 @@ class ITStaffDashboardTests(TestCase):
             admission_number="TEST/JSS1/0002", first_name="Tunde", last_name="Adebayo",
             current_class=cls.other_classroom,
         )
+        cls.draft_student = Student.objects.create(
+            admission_number="TEST/JSS1/0003", first_name="Draft", last_name="Result",
+            current_class=cls.classroom,
+        )
+        cls.blocked_student = Student.objects.create(
+            admission_number="TEST/JSS1/0004", first_name="Blocked", last_name="Result",
+            current_class=cls.classroom,
+        )
         department = Department.objects.create(name="Dashboard Test Department")
         subject = Subject.objects.create(
             name="English", department=department, level="junior"
@@ -68,6 +76,14 @@ class ITStaffDashboardTests(TestCase):
         TermResult.objects.create(
             student=cls.other_student, term=cls.term, overall_total=70, average=70,
             is_published=True,
+        )
+        TermResult.objects.create(
+            student=cls.draft_student, term=cls.term, overall_total=60, average=60,
+            is_published=False,
+        )
+        TermResult.objects.create(
+            student=cls.blocked_student, term=cls.term, overall_total=55, average=55,
+            is_published=True, is_blocked=True,
         )
 
     def test_staff_login_page_renders_and_login_enters_dashboard(self):
@@ -182,6 +198,37 @@ class ITStaffDashboardTests(TestCase):
         self.assertEqual(class_print.status_code, 200)
         self.assertNotContains(class_print, "Nwosu Ada")
 
+    def test_draft_result_is_not_available_for_individual_print_or_dashboard_action(self):
+        from apps.results.models import TermResult
+
+        self.client.force_login(self.it_user)
+        response = self.client.get(reverse(
+            "results:staff_result_print", args=[self.draft_student.pk, self.term.pk]
+        ))
+        self.assertEqual(response.status_code, 404)
+
+        dashboard = self.client.get(reverse("results:staff_dashboard"), {
+            "classroom": self.classroom.pk,
+            "session": self.term.session_id,
+            "term": self.term.pk,
+        })
+        self.assertContains(dashboard, "Draft")
+        self.assertNotContains(dashboard, reverse(
+            "results:staff_result_print", args=[self.draft_student.pk, self.term.pk]
+        ))
+
+    def test_unauthorized_user_cannot_access_individual_or_class_print(self):
+        self.client.force_login(self.unauthorized_user)
+        individual = self.client.get(reverse(
+            "results:staff_result_print", args=[self.student.pk, self.term.pk]
+        ))
+        class_results = self.client.get(reverse("results:staff_class_results_print"))
+
+        self.assertEqual(individual.status_code, 302)
+        self.assertEqual(individual["Location"], reverse("results:access_denied"))
+        self.assertEqual(class_results.status_code, 302)
+        self.assertEqual(class_results["Location"], reverse("results:access_denied"))
+
     def test_class_print_includes_only_students_with_term_results(self):
         self.client.force_login(self.it_user)
         response = self.client.get(reverse("results:staff_class_results_print"), {
@@ -192,6 +239,8 @@ class ITStaffDashboardTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Nwosu Ada")
         self.assertNotContains(response, "Adebayo Tunde")
+        self.assertNotContains(response, "Draft Result")
+        self.assertNotContains(response, "Blocked Result")
         self.assertContains(response, "Print All (1 students)")
 
     def test_it_user_cannot_access_django_admin_but_superuser_can(self):
@@ -237,7 +286,9 @@ class StaffOnlyResultAccessTests(TestCase):
             admission_number="TEST/0001", first_name="Test", last_name="Student",
             current_class=classroom,
         )
-        TermResult.objects.create(student=cls.student, term=cls.term)
+        TermResult.objects.create(
+            student=cls.student, term=cls.term, is_published=True
+        )
 
     def test_old_public_result_endpoint_is_not_available(self):
         response = self.client.get("/check-result/")

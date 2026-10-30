@@ -106,7 +106,7 @@
                             {% endif %}
                         </td>
                         <td class="staff-row-actions no-print">
-                            {% if selected_term and student.dashboard_result and not student.dashboard_result.is_blocked %}
+                            {% if selected_term and student.dashboard_result and student.dashboard_result.is_published and not student.dashboard_result.is_blocked %}
                             <a href="{% url 'results:staff_result_print' student.id selected_term.id %}">View / Print</a>
                             {% else %}—{% endif %}
                         </td>
