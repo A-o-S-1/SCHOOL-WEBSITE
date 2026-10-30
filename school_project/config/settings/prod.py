@@ -56,18 +56,12 @@ SECURE_HSTS_PRELOAD = True
 SECURE_CONTENT_TYPE_NOSNIFF = True
 SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
-# Keep teacher logins across browser restarts, while expiring sessions after
-# 14 days of inactivity. Active sessions are refreshed on each request.
-SESSION_COOKIE_AGE = 60 * 60 * 24 * 14
-SESSION_EXPIRE_AT_BROWSER_CLOSE = False
-SESSION_SAVE_EVERY_REQUEST = True
-
 # Optional persistent media storage (Supabase Storage S3-compatible API).
 # Configure all five AWS_* variables in Render to enable it. Without these,
 # Django falls back to local disk, which is NOT persistent on Render free.
 _media_env = (
     "AWS_STORAGE_BUCKET_NAME", "AWS_S3_ENDPOINT_URL", "AWS_S3_REGION_NAME",
-    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_S3_CUSTOM_DOMAIN",
 )
 if all(os.environ.get(key) for key in _media_env):
     INSTALLED_APPS = [*INSTALLED_APPS, "storages"]
@@ -77,10 +71,13 @@ if all(os.environ.get(key) for key in _media_env):
     }
     AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
     AWS_S3_ENDPOINT_URL = os.environ["AWS_S3_ENDPOINT_URL"].rstrip("/")
+    # Public URL base for public-bucket media; do not use the S3 API endpoint here.
+    AWS_S3_CUSTOM_DOMAIN = os.environ.get("AWS_S3_CUSTOM_DOMAIN", "").strip().rstrip("/")
     AWS_S3_REGION_NAME = os.environ["AWS_S3_REGION_NAME"]
     AWS_ACCESS_KEY_ID = os.environ["AWS_ACCESS_KEY_ID"]
     AWS_SECRET_ACCESS_KEY = os.environ["AWS_SECRET_ACCESS_KEY"]
     AWS_S3_FILE_OVERWRITE = False
+    AWS_S3_URL_PROTOCOL = "https:"
     AWS_DEFAULT_ACL = None
     AWS_QUERYSTRING_AUTH = False
     AWS_S3_ADDRESSING_STYLE = "path"
