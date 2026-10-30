@@ -15,10 +15,13 @@
             <h1>Welcome, {{ staff_name }}</h1>
             <p>Find student records and prepare official result sheets.</p>
         </div>
-        <form method="post" action="{% url 'results:staff_logout' %}">
-            {% csrf_token %}
-            <button type="submit" class="btn btn--outline">Log out</button>
-        </form>
+        <div class="staff-dashboard-actions">
+            <a href="{% url 'admin:index' %}" class="btn btn--outline">Admin Panel</a>
+            <form method="post" action="{% url 'results:staff_logout' %}">
+                {% csrf_token %}
+                <button type="submit" class="btn btn--outline">Log out</button>
+            </form>
+        </div>
     </div>
 </section>
 

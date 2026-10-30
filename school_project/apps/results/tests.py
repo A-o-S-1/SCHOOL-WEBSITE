@@ -246,6 +246,9 @@ class ITStaffDashboardTests(TestCase):
     def test_it_user_cannot_access_django_admin_but_superuser_can(self):
         self.assertFalse(self.it_user.is_staff)
         self.client.force_login(self.it_user)
+        dashboard = self.client.get(reverse("results:staff_dashboard"))
+        self.assertContains(dashboard, "Admin Panel")
+        self.assertContains(dashboard, f'href="{reverse("admin:index")}"')
         denied = self.client.get("/admin/")
         self.assertNotEqual(denied.status_code, 200)
 
