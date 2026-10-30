@@ -126,8 +126,7 @@ class ClassRoom(models.Model):
 
 
 class Student(models.Model):
-    """A student record. `admission_number` is the primary public identifier
-    staff use to locate the student's records."""
+    """A student record identified by the school's admission number."""
 
     GENDER_CHOICES = [("M", "Male"), ("F", "Female")]
 
@@ -146,6 +145,9 @@ class Student(models.Model):
 
     class Meta:
         ordering = ["last_name", "first_name"]
+        permissions = [
+            ("access_student_results", "Can access student results dashboard"),
+        ]
 
     def __str__(self):
         return f"{self.full_name} ({self.admission_number})"
@@ -296,13 +298,11 @@ class ResultEntry(models.Model):
 class TermResult(models.Model):
     """
     Per-student, per-term summary — the "cover sheet" of a result: overall
-    total/average, class position, remarks, and crucially the publish/block
-    flags that control public visibility.
+    total/average, class position, remarks, and staff-managed release/hold
+    flags.
 
-    Design decision: is_published defaults to False. A result only becomes
-    visible to parents once a staff member explicitly publishes it — matching
-    "Publish and/or Unpublish Results" from the original admin panel, and
-    preventing half-entered scores from ever being checkable.
+    Publication does not expose a result publicly. The IT dashboard remains
+    authenticated, and blocked results are withheld from print actions.
     """
 
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="term_results")
@@ -317,8 +317,14 @@ class TermResult(models.Model):
     class_teacher_remark = models.TextField(blank=True)
     administrator_remark = models.TextField(blank=True)
 
-    is_published = models.BooleanField(default=False, help_text="Only published results can be found via the public lookup.")
-    is_blocked = models.BooleanField(default=False, help_text="Overrides is_published — blocks this specific result even if the term is otherwise published (e.g. for a fees hold).")
+    is_published = models.BooleanField(
+        default=False,
+        help_text="Marks this result approved for release; access remains staff-only.",
+    )
+    is_blocked = models.BooleanField(
+        default=False,
+        help_text="Withholds this result from IT dashboard print actions (e.g. a fees hold).",
+    )
 
     generated_at = models.DateTimeField(auto_now=True)
 
@@ -328,11 +334,6 @@ class TermResult(models.Model):
 
     def __str__(self):
         return f"{self.student} — {self.term}"
-
-    @property
-    def is_publicly_visible(self):
-        return self.is_published and not self.is_blocked
-
 
 # ==============================================================================
 # Legacy scratch-card records. Kept for deployed-data compatibility only;

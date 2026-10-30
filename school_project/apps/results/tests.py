@@ -1,7 +1,7 @@
 """Tests for result access and staff-only result-management tools."""
 import datetime
 
-from django.test import TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 
 from apps.academics.models import Department, Subject
@@ -13,15 +13,217 @@ from apps.results.models import (
 )
 
 
+@override_settings(STORAGES={
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+})
+class ITStaffDashboardTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        from django.contrib.auth.models import Group, User
+        from apps.results.models import ResultEntry, TermResult
+
+        cls.it_group = Group.objects.get(name="IT Staff")
+        cls.it_user = User.objects.create_user(
+            username="it-operator", password="long-test-password"
+        )
+        cls.it_user.groups.add(cls.it_group)
+        cls.unauthorized_user = User.objects.create_user(
+            username="ordinary-user", password="long-test-password"
+        )
+        cls.inactive_it_user = User.objects.create_user(
+            username="inactive-operator", password="long-test-password", is_active=False
+        )
+        cls.inactive_it_user.groups.add(cls.it_group)
+        cls.superuser = User.objects.create_superuser(
+            username="school-admin", email="admin@example.test", password="long-test-password"
+        )
+
+        session = AcademicSession.objects.create(
+            label="2025/2026", start_date=datetime.date(2025, 9, 1),
+            end_date=datetime.date(2026, 7, 31), is_current=True,
+        )
+        cls.term = Term.objects.create(session=session, name="first", is_current=True)
+        cls.classroom = ClassRoom.objects.create(name="JSS1A", level="jss1", arm="A")
+        cls.other_classroom = ClassRoom.objects.create(name="JSS1B", level="jss1", arm="B")
+        cls.student = Student.objects.create(
+            admission_number="TEST/JSS1/0001", first_name="Ada", last_name="Nwosu",
+            current_class=cls.classroom,
+        )
+        cls.other_student = Student.objects.create(
+            admission_number="TEST/JSS1/0002", first_name="Tunde", last_name="Adebayo",
+            current_class=cls.other_classroom,
+        )
+        department = Department.objects.create(name="Dashboard Test Department")
+        subject = Subject.objects.create(
+            name="English", department=department, level="junior"
+        )
+        ResultEntry.objects.create(
+            student=cls.student, term=cls.term, subject=subject, ca_score=24, exam_score=61
+        )
+        TermResult.objects.create(
+            student=cls.student, term=cls.term, overall_total=85, average=85,
+            position_in_class="1st out of 1", is_published=True,
+        )
+        TermResult.objects.create(
+            student=cls.other_student, term=cls.term, overall_total=70, average=70,
+            is_published=True,
+        )
+
+    def test_staff_login_page_renders_and_login_enters_dashboard(self):
+        response = self.client.get(reverse("results:staff_login"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Staff Login")
+
+        response = self.client.post(reverse("results:staff_login"), {
+            "username": "it-operator",
+            "password": "long-test-password",
+        })
+        self.assertRedirects(response, reverse("results:staff_dashboard"))
+        dashboard = self.client.get(reverse("results:staff_dashboard"))
+        self.assertEqual(dashboard.status_code, 200)
+        self.assertContains(dashboard, "Welcome, it-operator")
+
+    def test_login_without_it_permission_redirects_to_access_denied(self):
+        response = self.client.post(reverse("results:staff_login"), {
+            "username": "ordinary-user",
+            "password": "long-test-password",
+        })
+        self.assertRedirects(
+            response, reverse("results:access_denied"), fetch_redirect_response=False
+        )
+
+    def test_logout_requires_csrf_protected_post(self):
+        client = Client(enforce_csrf_checks=True)
+        client.force_login(self.it_user)
+        dashboard = client.get(reverse("results:staff_dashboard"))
+        self.assertEqual(dashboard.status_code, 200)
+        csrf_token = client.cookies["csrftoken"].value
+
+        rejected = client.post(reverse("results:staff_logout"))
+        self.assertEqual(rejected.status_code, 403)
+
+        logged_out = client.post(
+            reverse("results:staff_logout"),
+            HTTP_X_CSRFTOKEN=csrf_token,
+        )
+        self.assertEqual(logged_out.status_code, 302)
+        self.assertEqual(logged_out["Location"], reverse("pages:home"))
+
+    def test_anonymous_dashboard_request_redirects_to_staff_login(self):
+        response = self.client.get(reverse("results:staff_dashboard"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("results:staff_login"), response["Location"])
+
+    def test_authenticated_user_without_it_permission_gets_access_denied(self):
+        self.client.force_login(self.unauthorized_user)
+        response = self.client.get(reverse("results:staff_dashboard"))
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], reverse("results:access_denied"))
+        denied = self.client.get(reverse("results:access_denied"))
+        self.assertEqual(denied.status_code, 403)
+
+    def test_inactive_it_account_cannot_use_an_existing_session(self):
+        self.client.force_login(self.inactive_it_user)
+        response = self.client.get(reverse("results:staff_dashboard"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn(reverse("results:staff_login"), response["Location"])
+
+    def test_it_user_can_search_and_filter_students_and_results(self):
+        self.client.force_login(self.it_user)
+        response = self.client.get(reverse("results:staff_dashboard"), {
+            "search": "TEST/JSS1",
+            "classroom": self.classroom.pk,
+            "session": self.term.session_id,
+            "term": self.term.pk,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Nwosu Ada")
+        self.assertContains(response, "Published")
+        self.assertNotContains(response, "Adebayo Tunde")
+        self.assertContains(response, reverse(
+            "results:staff_result_print", args=[self.student.pk, self.term.pk]
+        ))
+
+    def test_it_user_can_view_and_print_official_result_sheet(self):
+        self.client.force_login(self.it_user)
+        response = self.client.get(reverse(
+            "results:staff_result_print", args=[self.student.pk, self.term.pk]
+        ))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Mater Domini")
+        self.assertContains(response, "English")
+        self.assertContains(response, "24.0")
+        self.assertContains(response, "61.0")
+
+    def test_blocked_result_is_not_available_for_individual_print(self):
+        from apps.results.models import TermResult
+
+        TermResult.objects.filter(student=self.student, term=self.term).update(is_blocked=True)
+        self.client.force_login(self.it_user)
+        response = self.client.get(reverse(
+            "results:staff_result_print", args=[self.student.pk, self.term.pk]
+        ))
+        self.assertEqual(response.status_code, 404)
+
+        dashboard = self.client.get(reverse("results:staff_dashboard"), {
+            "classroom": self.classroom.pk,
+            "session": self.term.session_id,
+            "term": self.term.pk,
+        })
+        self.assertContains(dashboard, "Blocked")
+        self.assertNotContains(dashboard, "View / Print")
+
+        class_print = self.client.get(reverse("results:staff_class_results_print"), {
+            "classroom": self.classroom.pk,
+            "session": self.term.session_id,
+            "term": self.term.pk,
+        })
+        self.assertEqual(class_print.status_code, 200)
+        self.assertNotContains(class_print, "Nwosu Ada")
+
+    def test_class_print_includes_only_students_with_term_results(self):
+        self.client.force_login(self.it_user)
+        response = self.client.get(reverse("results:staff_class_results_print"), {
+            "classroom": self.classroom.pk,
+            "session": self.term.session_id,
+            "term": self.term.pk,
+        })
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Nwosu Ada")
+        self.assertNotContains(response, "Adebayo Tunde")
+        self.assertContains(response, "Print All (1 students)")
+
+    def test_it_user_cannot_access_django_admin_but_superuser_can(self):
+        self.assertFalse(self.it_user.is_staff)
+        self.client.force_login(self.it_user)
+        denied = self.client.get("/admin/")
+        self.assertNotEqual(denied.status_code, 200)
+
+        self.client.force_login(self.superuser)
+        admin_response = self.client.get("/admin/")
+        self.assertEqual(admin_response.status_code, 200)
+
+    def test_old_scratch_card_endpoint_is_not_available(self):
+        response = self.client.get("/check-result/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_public_staff_login_link_uses_the_dedicated_portal(self):
+        response = self.client.get(reverse("pages:home"))
+        self.assertContains(response, f'href="{reverse("results:staff_login")}"')
+        self.assertNotContains(response, 'href="/admin/login/"')
+
+
 class StaffOnlyResultAccessTests(TestCase):
     @classmethod
     def setUpTestData(cls):
-        from django.contrib.auth.models import User
+        from django.contrib.auth.models import Group, User
         from apps.results.models import TermResult
 
         cls.teacher = User.objects.create_user(
-            username="teacher", password="long-test-password", is_staff=True
+            username="teacher", password="long-test-password"
         )
+        cls.teacher.groups.add(Group.objects.get(name="IT Staff"))
         cls.student_user = User.objects.create_user(
             username="nonstaff", password="long-test-password", is_staff=False
         )
@@ -74,6 +276,8 @@ class StaffToolsTests(TestCase):
         cls.staff_user = User.objects.create_user(
             username="staffmember", password="testpass123", is_staff=True
         )
+        from django.contrib.auth.models import Group
+        cls.staff_user.groups.add(Group.objects.get(name="IT Staff"))
 
         session = AcademicSession.objects.create(
             label="2025/2026", start_date=datetime.date(2025, 9, 1),
@@ -301,6 +505,10 @@ class WorkbookUploadTests(TestCase):
         self.assertEqual(math_entry.exam_score, 58)
 
 
+@override_settings(STORAGES={
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"},
+})
 class StaffPrintViewTests(TestCase):
     """
     Covers the print-without-scratch-card staff views added for form
@@ -310,12 +518,13 @@ class StaffPrintViewTests(TestCase):
 
     @classmethod
     def setUpTestData(cls):
-        from django.contrib.auth.models import User
+        from django.contrib.auth.models import Group, User
         from apps.results.models import ResultEntry, TermResult
 
         cls.staff_user = User.objects.create_user(
-            username="printstaff", password="testpass123", is_staff=True
+            username="printstaff", password="testpass123"
         )
+        cls.staff_user.groups.add(Group.objects.get(name="IT Staff"))
         session = AcademicSession.objects.create(
             label="2025/2026", start_date=datetime.date(2025, 9, 1),
             end_date=datetime.date(2026, 7, 31), is_current=True,
@@ -358,6 +567,9 @@ class StaffPrintViewTests(TestCase):
 
     def test_class_bulk_print_lists_every_student_in_class(self):
         self.client.force_login(self.staff_user)
-        url = f"{reverse('results:staff_class_results_print')}?term={self.term.id}&classroom={self.classroom.id}"
+        url = (
+            f"{reverse('results:staff_class_results_print')}?session={self.term.session_id}"
+            f"&term={self.term.id}&classroom={self.classroom.id}"
+        )
         response = self.client.get(url)
         self.assertContains(response, "Test Print")

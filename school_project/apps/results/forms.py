@@ -1,6 +1,42 @@
 from django import forms
 
 
+class StaffDashboardFilterForm(forms.Form):
+    search = forms.CharField(label="Student", required=False)
+    classroom = forms.ChoiceField(label="Class", required=False)
+    session = forms.ChoiceField(label="Academic session", required=False)
+    term = forms.ChoiceField(label="Term", required=False)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        from .models import AcademicSession, ClassRoom, Term
+
+        self.fields["classroom"].choices = [("", "All classes")] + [
+            (classroom.pk, classroom.name) for classroom in ClassRoom.objects.all()
+        ]
+        self.fields["session"].choices = [("", "All sessions")] + [
+            (session.pk, session.label) for session in AcademicSession.objects.all()
+        ]
+
+        session_id = self.data.get("session") or self.initial.get("session")
+        terms = Term.objects.select_related("session")
+        if session_id:
+            terms = terms.filter(session_id=session_id)
+        self.fields["term"].choices = [("", "Select a term")] + [
+            (term.pk, str(term)) for term in terms
+        ]
+
+    def clean(self):
+        cleaned_data = super().clean()
+        session_id = cleaned_data.get("session")
+        term_id = cleaned_data.get("term")
+        if session_id and term_id:
+            from .models import Term
+            if not Term.objects.filter(pk=term_id, session_id=session_id).exists():
+                self.add_error("term", "Choose a term from the selected academic session.")
+        return cleaned_data
+
+
 class ScoreCSVUploadForm(forms.Form):
     """
     Bulk score upload. Expected CSV columns (header row required):

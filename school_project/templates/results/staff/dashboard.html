@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Staff Dashboard — {{ school_info.school_name }}{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/it-dashboard.css' %}">
+{% endblock %}
+
+{% block content %}
+<section class="staff-portal-hero no-print">
+    <div class="container staff-portal-hero__row">
+        <div>
+            <p class="eyebrow">Staff Portal</p>
+            <h1>Welcome, {{ staff_name }}</h1>
+            <p>Find student records and prepare official result sheets.</p>
+        </div>
+        <form method="post" action="{% url 'results:staff_logout' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn--outline">Log out</button>
+        </form>
+    </div>
+</section>
+
+<section class="staff-dashboard">
+    <div class="container">
+        <div class="staff-dashboard-summary" aria-label="School records summary">
+            <div class="staff-stat"><span class="staff-stat__label">Active students</span><strong class="staff-stat__value">{{ active_student_count }}</strong></div>
+            <div class="staff-stat"><span class="staff-stat__label">Classes</span><strong class="staff-stat__value">{{ class_count }}</strong></div>
+            <div class="staff-stat"><span class="staff-stat__label">Academic sessions</span><strong class="staff-stat__value">{{ session_count }}</strong></div>
+            <div class="staff-stat"><span class="staff-stat__label">Term result records</span><strong class="staff-stat__value">{{ result_count }}</strong></div>
+        </div>
+
+        <div class="staff-dashboard-heading">
+            <div>
+                <p class="eyebrow">Student records</p>
+                <h2>Find a result</h2>
+            </div>
+        </div>
+
+        <form method="get" class="staff-filter-panel staff-filter-grid no-print">
+            <div class="staff-filter-field">
+                <label for="{{ form.search.id_for_label }}">Search student</label>
+                {{ form.search }}
+                {% for error in form.search.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="staff-filter-field">
+                <label for="{{ form.classroom.id_for_label }}">Class</label>
+                {{ form.classroom }}
+                {% for error in form.classroom.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="staff-filter-field">
+                <label for="{{ form.session.id_for_label }}">Academic session</label>
+                {{ form.session }}
+                {% for error in form.session.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <div class="staff-filter-field">
+                <label for="{{ form.term.id_for_label }}">Term</label>
+                {{ form.term }}
+                {% for error in form.term.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <button type="submit" class="btn btn--accent">Search</button>
+        </form>
+
+        {% if not filters_valid %}
+            <p class="alert alert--error" role="alert">Check the selected session and term, then search again.</p>
+        {% endif %}
+
+        <div class="staff-result-toolbar no-print">
+            <p>
+                {% if selected_term %}Results for {{ selected_term }}{% else %}Select a term to see result status and print actions.{% endif %}
+                <span> · {{ students_page.paginator.count }} student{{ students_page.paginator.count|pluralize }}</span>
+            </p>
+            {% if selected_term_id and selected_classroom_id and selected_session_id and filters_valid %}
+            <form method="get" action="{% url 'results:staff_class_results_print' %}" onsubmit="return confirm('Prepare result sheets for every student with a result in this class and term?');">
+                <input type="hidden" name="session" value="{{ selected_session_id }}">
+                <input type="hidden" name="term" value="{{ selected_term_id }}">
+                <input type="hidden" name="classroom" value="{{ selected_classroom_id }}">
+                <button type="submit" class="btn btn--outline-dark">Prepare class print</button>
+            </form>
+            {% endif %}
+        </div>
+
+        <div class="staff-results-scroll">
+            <table class="staff-results-table">
+                <thead>
+                    <tr><th>Student</th><th>Admission number</th><th>Class</th><th>Result status</th><th class="no-print">Action</th></tr>
+                </thead>
+                <tbody>
+                    {% for student in students_page %}
+                    <tr>
+                        <td class="staff-student-name">{{ student.full_name }}</td>
+                        <td>{{ student.admission_number }}</td>
+                        <td>{{ student.current_class|default:"—" }}</td>
+                        <td>
+                            {% if not selected_term %}
+                                <span class="staff-result-status">Select a term</span>
+                            {% elif not student.dashboard_result %}
+                                <span class="staff-result-status">No result recorded</span>
+                            {% elif student.dashboard_result.is_blocked %}
+                                <span class="staff-result-status staff-result-status--blocked">Blocked</span>
+                            {% elif student.dashboard_result.is_published %}
+                                <span class="staff-result-status staff-result-status--published">Published</span>
+                            {% else %}
+                                <span class="staff-result-status staff-result-status--draft">Draft</span>
+                            {% endif %}
+                        </td>
+                        <td class="staff-row-actions no-print">
+                            {% if selected_term and student.dashboard_result and not student.dashboard_result.is_blocked %}
+                            <a href="{% url 'results:staff_result_print' student.id selected_term.id %}">View / Print</a>
+                            {% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    {% empty %}
+                    <tr><td colspan="5">No active students match these filters.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if students_page.has_other_pages %}
+        <nav class="staff-pagination no-print" aria-label="Student results pages">
+            {% if students_page.has_previous %}<a href="?{% if request.GET %}{{ request.GET.urlencode }}&amp;{% endif %}page={{ students_page.previous_page_number }}">Previous</a>{% endif %}
+            <span>Page {{ students_page.number }} of {{ students_page.paginator.num_pages }}</span>
+            {% if students_page.has_next %}<a href="?{% if request.GET %}{{ request.GET.urlencode }}&amp;{% endif %}page={{ students_page.next_page_number }}">Next</a>{% endif %}
+        </nav>
+        {% endif %}
+    </div>
+</section>
+{% endblock %}

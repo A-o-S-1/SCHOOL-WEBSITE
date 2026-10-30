@@ -24,7 +24,11 @@
                 <li><a href="{% url 'news_events:event_list' %}" class="{% nav_active 'news_events:event_list' %}" {% nav_aria_current 'news_events:event_list' %}>Events</a></li>
                 <li><a href="{% url 'contact:contact' %}" class="{% nav_active 'contact:contact' %}" {% nav_aria_current 'contact:contact' %}>Contact</a></li>
             </ul>
-            <a href="{% url 'admin:login' %}" class="btn btn--accent nav-cta">Staff Login</a>
+            {% if user.is_superuser or perms.results.access_student_results %}
+            <a href="{% url 'results:staff_dashboard' %}" class="btn btn--accent nav-cta">Staff Dashboard</a>
+            {% else %}
+            <a href="{% url 'results:staff_login' %}" class="btn btn--accent nav-cta">Staff Login</a>
+            {% endif %}
         </nav>
     </div>
 </header>

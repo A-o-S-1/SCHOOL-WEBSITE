@@ -1,10 +1,9 @@
 # Deployment Checklist — Mater Domini Schools Website
 
-This is a practical, in-order checklist for taking the full site — the
-public website AND the Result Portal (scratch cards, staff workbook
-uploads, result printing) — from your machine to a live production
-server. Work through it top to bottom the first time you deploy; keep it
-handy for future redeploys too.
+This is a practical, in-order checklist for taking the public website and
+the IT Staff results dashboard from development to production. Work
+through it top to bottom the first time you deploy; keep it handy for
+future redeploys too.
 
 ## Recommended timeline for your launch
 
@@ -14,7 +13,7 @@ minimizes risk:
 1. **Days 1–3: Choose hosting, provision Postgres, point the domain** (steps 1–3 below). Domain DNS propagation can take hours, so start this immediately even if nothing else is ready.
 2. **Days 3–5: Deploy the code with demo/seed data still in place**, run through the full verification checklist (step 8) against that demo data first. It's much easier to spot a bug in a placeholder result than to debug live while parents are watching.
 3. **Days 5–10: Import real data** (step 7b) — one class/arm workbook at a time, checking each prints correctly before moving to the next. This is naturally the slowest step; budget the most time here.
-4. **Days 10–12: Generate and hand out scratch cards**, test the public lookup with 2–3 real students/parents before wide release.
+4. **Days 10–12: Create IT staff accounts**, test dashboard access and print a small set of real results before wider use.
 5. **Days 12–14: Final full verification pass, then publish results and announce the site.** Keep the old system available in parallel for a few days as a fallback in case something unexpected comes up.
 
 ## 1. Choose where it will run
@@ -92,6 +91,17 @@ python manage.py migrate
 python manage.py createsuperuser
 ```
 
+The results migration creates the `IT Staff` group and grants it only the
+student-results dashboard permission. It does not change or delete student,
+class, term, session, or result records. No new Render environment variables
+are required.
+
+On Render, run `python manage.py migrate --noinput` from the service Shell
+before releasing the new code, or configure it as the service's pre-deploy
+command if that feature is available on your plan. The existing `build.sh`
+continues to install dependencies and run `collectstatic`; no database
+connection or storage settings need to change.
+
 Then load starter content (real school info + placeholder demo entries
 you'll replace via `/admin/`):
 
@@ -159,26 +169,29 @@ Use [Certbot](https://certbot.eff.org/) for a free Let's Encrypt
 certificate. `SECURE_SSL_REDIRECT` and friends are already turned on in
 `prod.py`, so once HTTPS is live, HTTP will auto-redirect.
 
-## 7b. Import your real 2025/2026 data before launch
+## 7b. Import and verify results before launch
 
 You're rebuilding real result data for JSS1–SS3 (all arms) for the
 current session. Do this **on the production database, after deploying
 but before announcing the site**, in this order:
 
-1. Log into `/admin/` with your real superuser account (not the demo one).
-2. For each class/arm's workbook: `/staff/upload-workbook/` — this creates
+1. Log into `/admin/` with the real superuser account (not the demo one).
+2. For each class/arm workbook, use `/staff/upload-workbook/` — this creates
    every student in the REGISTER sheet automatically, then writes
    whatever term sheets are present. Repeat once per class/arm.
 3. After all classes are in, run `python manage.py recalculate_positions`
    once to make sure every class's rankings reflect the complete data
    (the upload does this per-upload already, but one final pass after
    *all* classes exist is a good sanity check).
-4. Generate scratch cards for the term(s) you're publishing:
-   `/admin/results/scratchcardbatch/`, then check individual results
-   print correctly via `/staff/result/<student_id>/<term_id>/` before
-   publishing anything to parents.
-5. Only then: use the `TermResult` admin's "Publish selected results"
-   action for the term(s) ready to be checked publicly.
+4. In Django Admin, create each IT account and assign it to the `IT Staff`
+  group. Do not mark the account as staff or superuser; the dashboard
+  permission is sufficient and does not grant Django Admin access.
+5. Sign in at `/staff/login/`, select class, session and term in
+  `/staff/dashboard/`, and verify individual and class print previews.
+
+The public scratch-card workflow is retired. `/check-result/` is no longer
+a valid route. IT staff use the dashboard; the superuser retains full
+Django Admin access.
 
 **Do not run `seed_demo_data` or `seed_results_demo_data` on the
 production database.** Those are for local development only — they
@@ -192,9 +205,10 @@ that have no business on the live site. On production, only ever run
 - [ ] Submit the Admissions inquiry form and the Contact form — confirm both save (check `/admin/`)
 - [ ] Log into `/admin/` and replace every `[Placeholder ...]` entry (staff bios, sample news/events) with real content — search the admin for `[Placeholder` and `[Sample` to find every one
 - [ ] Upload the school's real photos in Gallery, staff photos in Staff Directory
-- [ ] Test `/check-result/` end-to-end with one real student and one real (unused) scratch card — confirm the result shown matches what's in the admin, and that the card is marked used afterward
-- [ ] Print an individual result (`/staff/result/<student_id>/<term_id>/`) and confirm it lands on exactly one A4 page on paper, not just on screen — printer margins can differ slightly from the browser preview
-- [ ] Confirm unpublished/blocked results correctly refuse a lookup even with a valid card
+- [ ] Confirm `/check-result/` is retired and the public site links to `/staff/login/`, not Django Admin
+- [ ] Sign in with an IT account, confirm dashboard access, student search and filters, and print an individual result
+- [ ] Print a class batch and confirm each student's sheet starts on a new page; printer margins can differ from browser preview
+- [ ] Confirm an IT account cannot access `/admin/`, while the superuser can
 - [ ] Confirm HTTPS works and HTTP redirects to it
 - [ ] Confirm `/admin/` requires login and isn't publicly browsable
 - [ ] Check the site on an actual phone, not just a resized browser window
@@ -206,6 +220,6 @@ that have no business on the live site. On production, only ever run
 ## 9. Ongoing maintenance
 
 - **Backups**: set up automatic daily Postgres backups through your host — this is more important than almost anything else on this list. Losing the database means losing every result, staff profile, and news post.
-- **Updating content**: school staff can add News/Events/Gallery photos/Staff entries anytime via `/admin/` — no developer needed for routine content updates.
+- **Updating content**: authorized administrators manage site content and imports via `/admin/`; IT accounts use `/staff/dashboard/` for student result retrieval and printing.
 - **Deploying code changes**: pull the latest code, `pip install -r requirements/prod.txt` (in case dependencies changed), `python manage.py migrate` (in case models changed), `python manage.py collectstatic --noinput`, restart Gunicorn.
 - **Rotating the SECRET_KEY**: only if you suspect it's been exposed — rotating it invalidates all active sessions (everyone gets logged out) but not stored data.

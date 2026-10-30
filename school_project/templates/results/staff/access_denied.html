@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Access Denied — {{ school_info.school_name }}{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/it-dashboard.css' %}">
+{% endblock %}
+
+{% block content %}
+<section class="staff-denied-wrap">
+    <div class="staff-login-panel">
+        <p class="eyebrow">403</p>
+        <h1>Access Denied</h1>
+        <p>Your account is signed in, but it is not authorised to access student results.</p>
+        <a href="{% url 'pages:home' %}" class="btn btn--accent">Return to website</a>
+    </div>
+</section>
+{% endblock %}

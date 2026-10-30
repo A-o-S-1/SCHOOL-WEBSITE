@@ -1,165 +1,138 @@
 import csv
 import io
-from datetime import timedelta
+from functools import wraps
 
 import openpyxl
+from django.contrib.auth.views import LoginView, LogoutView, redirect_to_login
 from django.contrib.admin.views.decorators import staff_member_required
+from django.core.paginator import Paginator
 from django.db import transaction
-from django.shortcuts import redirect, render
+from django.db.models import Prefetch, Q
+from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
-from django.utils import timezone
 from django.utils.decorators import method_decorator
 from django.views import View
-from django.views.generic import FormView
+from django.views.generic import TemplateView
 
 from . import services
-from .forms import MasterSheetForm, PromotionResultForm, ResultLookupForm, ScoreCSVUploadForm, WorkbookUploadForm
+from .forms import (
+    MasterSheetForm,
+    PromotionResultForm,
+    ScoreCSVUploadForm,
+    StaffDashboardFilterForm,
+    WorkbookUploadForm,
+)
 from .models import (
-    AcademicSession, ClassRoom, ResultCheckLog, ResultEntry, PsychomotorRating,
-    ScratchCard, SessionResult, Student, Term, TermResult,
+    AcademicSession,
+    ClassRoom,
+    ResultEntry,
+    PsychomotorRating,
+    SessionResult,
+    Student,
+    Term,
+    TermResult,
 )
 from apps.academics.models import Subject
 
-# How many failed attempts from one IP within the window before we block
-# further tries. Deliberately generous enough not to lock out a parent who
-# fat-fingers a PIN twice, strict enough to make brute-forcing impractical.
-RATE_LIMIT_MAX_ATTEMPTS = 5
-RATE_LIMIT_WINDOW_MINUTES = 15
-
-# How long a successful lookup stays viewable before the parent has to
-# check again with the (now-used-up) card. Short enough that a result
-# left open on a shared/library computer doesn't stay exposed for long.
-SESSION_UNLOCK_MINUTES = 15
-
-SESSION_KEY = "unlocked_term_result_id"
-SESSION_KEY_EXPIRES = "unlocked_term_result_expires"
+IT_STAFF_PERMISSION = "results.access_student_results"
 
 
-def _client_ip(request):
-    """
-    Best-effort real client IP behind a reverse proxy. Checked against
-    X-Forwarded-For first (set by Nginx/the hosting platform in production),
-    falling back to REMOTE_ADDR for local development.
-    """
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR", "0.0.0.0")
-
-
-def _is_rate_limited(ip_address):
-    window_start = timezone.now() - timedelta(minutes=RATE_LIMIT_WINDOW_MINUTES)
-    recent_failed = ResultCheckLog.objects.filter(
-        ip_address=ip_address, was_successful=False, attempted_at__gte=window_start
-    ).count()
-    return recent_failed >= RATE_LIMIT_MAX_ATTEMPTS
-
-
-class ResultLookupView(FormView):
-    """
-    Public result lookup: Admission Number + Term + Scratch Card PIN + Serial.
-
-    Security properties (see also the module-level constants above):
-    - Every attempt is logged (ResultCheckLog), success or failure.
-    - Failures never reveal WHICH field was wrong — same generic message
-      whether the admission number doesn't exist, the PIN is wrong, the
-      card was already used, or the result simply isn't published yet.
-      Distinguishing these would let an attacker enumerate valid admission
-      numbers or valid-but-unused PINs one field at a time.
-    - IP-based rate limiting via the same log table — no new dependency.
-    - On success, the card is immediately marked used (single-use) and the
-      result becomes viewable only through a time-limited session flag,
-      not a bookmarkable/guessable URL.
-    """
-    template_name = "results/lookup.html"
-    form_class = ResultLookupForm
-
-    def form_valid(self, form):
-        ip_address = _client_ip(self.request)
-        admission_number = form.cleaned_data["admission_number"]
-
-        if _is_rate_limited(ip_address):
-            form.add_error(None, "Too many attempts. Please wait 15 minutes before trying again.")
-            return self.render_to_response(self.get_context_data(form=form))
-
-        term = Term.objects.filter(pk=form.cleaned_data["term"]).first()
-        student = Student.objects.filter(admission_number__iexact=admission_number, is_active=True).first()
-        card = ScratchCard.objects.filter(
-            serial_number__iexact=form.cleaned_data["serial_number"],
-            pin=form.cleaned_data["pin"],
-            is_used=False,
-        ).first()
-
-        term_result = None
-        if student and term:
-            term_result = TermResult.objects.filter(student=student, term=term).first()
-
-        success = bool(student and term and card and term_result and term_result.is_publicly_visible)
-
-        ResultCheckLog.objects.create(
-            admission_number_attempted=admission_number, ip_address=ip_address, was_successful=success
-        )
-
-        if not success:
-            form.add_error(
-                None,
-                "We couldn't find a result matching those details. Please double-check your admission "
-                "number, term, PIN, and serial number, or confirm the result has been published.",
+def it_staff_required(view_func):
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return redirect_to_login(
+                request.get_full_path(), login_url=reverse("results:staff_login")
             )
-            return self.render_to_response(self.get_context_data(form=form))
+        if request.user.is_active and (
+            request.user.is_superuser or request.user.has_perm(IT_STAFF_PERMISSION)
+        ):
+            return view_func(request, *args, **kwargs)
+        return redirect("results:access_denied")
 
-        card.mark_used(student)
-        self.request.session[SESSION_KEY] = term_result.id
-        self.request.session[SESSION_KEY_EXPIRES] = (
-            timezone.now() + timedelta(minutes=SESSION_UNLOCK_MINUTES)
-        ).isoformat()
-        return redirect(reverse("results:view_result"))
+    return wrapped
 
 
-class ResultDetailView(View):
-    """
-    Displays the unlocked result — reachable only via a valid session flag
-    set by ResultLookupView, never by a direct/guessable URL. Session flag
-    is time-limited and single-use per successful card check.
-    """
-    template_name = "results/result_detail.html"
+class StaffLoginView(LoginView):
+    template_name = "results/staff/login.html"
+    redirect_authenticated_user = True
+
+    def get_success_url(self):
+        if self.request.user.is_active and (
+            self.request.user.is_superuser or self.request.user.has_perm(IT_STAFF_PERMISSION)
+        ):
+            return self.get_redirect_url() or reverse("results:staff_dashboard")
+        return reverse("results:access_denied")
+
+
+class StaffLogoutView(LogoutView):
+    next_page = "pages:home"
+
+
+class StaffAccessDeniedView(TemplateView):
+    template_name = "results/staff/access_denied.html"
+
+    def get(self, request, *args, **kwargs):
+        return self.render_to_response(self.get_context_data(), status=403)
+
+
+@method_decorator(it_staff_required, name="dispatch")
+class StaffDashboardView(View):
+    template_name = "results/staff/dashboard.html"
 
     def get(self, request):
-        term_result_id = request.session.get(SESSION_KEY)
-        expires_at = request.session.get(SESSION_KEY_EXPIRES)
+        current_term = Term.objects.filter(is_current=True).select_related("session").first()
+        initial = {}
+        if current_term:
+            initial = {"session": current_term.session_id, "term": current_term.pk}
 
-        if not term_result_id or not expires_at or timezone.now().isoformat() > expires_at:
-            request.session.pop(SESSION_KEY, None)
-            request.session.pop(SESSION_KEY_EXPIRES, None)
-            return redirect(reverse("results:check"))
+        form = StaffDashboardFilterForm(request.GET or None, initial=initial)
+        if request.GET:
+            filters_valid = form.is_valid()
+            filters = form.cleaned_data if filters_valid else {}
+        else:
+            filters_valid = True
+            filters = initial
 
-        term_result = TermResult.objects.filter(pk=term_result_id, is_published=True, is_blocked=False).first()
-        if not term_result:
-            return redirect(reverse("results:check"))
+        students = Student.objects.filter(is_active=True).select_related("current_class")
+        search = filters.get("search", "")
+        if search:
+            students = students.filter(
+                Q(first_name__icontains=search)
+                | Q(middle_name__icontains=search)
+                | Q(last_name__icontains=search)
+                | Q(admission_number__icontains=search)
+            )
+        if filters.get("classroom"):
+            students = students.filter(current_class_id=filters["classroom"])
 
-        result_entries = ResultEntry.objects.filter(
-            student=term_result.student, term=term_result.term
-        ).select_related("subject")
-        psychomotor_ratings = PsychomotorRating.objects.filter(
-            student=term_result.student, term=term_result.term
-        ).select_related("skill")
+        selected_term_id = filters.get("term")
+        selected_term = Term.objects.filter(pk=selected_term_id).first() if selected_term_id else None
+        result_queryset = TermResult.objects.none()
+        if selected_term:
+            result_queryset = TermResult.objects.filter(term=selected_term).select_related("term")
+
+        students = students.prefetch_related(
+            Prefetch("term_results", queryset=result_queryset, to_attr="dashboard_term_results")
+        ).order_by("last_name", "first_name")
+        page = Paginator(students, 30).get_page(request.GET.get("page"))
+        for student in page.object_list:
+            student.dashboard_result = next(iter(student.dashboard_term_results), None)
 
         return render(request, self.template_name, {
-            "term_result": term_result,
-            "student": term_result.student,
-            "result_entries": result_entries,
-            "psychomotor_ratings": psychomotor_ratings,
+            "form": form,
+            "filters_valid": filters_valid,
+            "students_page": page,
+            "selected_term": selected_term,
+            "selected_term_id": selected_term.pk if selected_term else "",
+            "selected_session_id": filters.get("session", ""),
+            "selected_classroom_id": filters.get("classroom", ""),
+            "active_student_count": Student.objects.filter(is_active=True).count(),
+            "class_count": ClassRoom.objects.count(),
+            "session_count": AcademicSession.objects.count(),
+            "result_count": TermResult.objects.count(),
+            "staff_name": request.user.get_full_name() or request.user.get_username(),
         })
-
-
-class ResultLogoutView(View):
-    """Lets the parent explicitly clear the unlocked result before the
-    session naturally expires — e.g. on a shared computer."""
-
-    def get(self, request):
-        request.session.pop(SESSION_KEY, None)
-        request.session.pop(SESSION_KEY_EXPIRES, None)
-        return redirect(reverse("results:check"))
 
 
 # ==============================================================================
@@ -267,7 +240,7 @@ class ScoreUploadView(View):
         })
 
 
-@method_decorator(staff_member_required, name="dispatch")
+@method_decorator(it_staff_required, name="dispatch")
 class MasterSheetView(View):
     """
     Printable class-wide broadsheet: every active student in a class, every
@@ -666,19 +639,15 @@ class WorkbookUploadView(View):
 # without a scratch card — for form teachers/admin who already have
 # legitimate access to every student's record, not just their own child's.
 # ==============================================================================
-@method_decorator(staff_member_required, name="dispatch")
+@method_decorator(it_staff_required, name="dispatch")
 class StaffResultPrintView(View):
-    """One student's result sheet, reusing the same partial the public
-    lookup flow renders — staff just skip the PIN/serial check entirely."""
+    """Print one student's official result sheet for authorized IT staff."""
     template_name = "results/staff/result_print.html"
 
     def get(self, request, student_id, term_id):
-        student = Student.objects.filter(pk=student_id).first()
-        term = Term.objects.filter(pk=term_id).first()
-        if not student or not term:
-            return render(request, self.template_name, {"not_found": True})
-
-        term_result = TermResult.objects.filter(student=student, term=term).first()
+        student = get_object_or_404(Student, pk=student_id)
+        term = get_object_or_404(Term, pk=term_id)
+        term_result = get_object_or_404(TermResult, student=student, term=term, is_blocked=False)
         result_entries = ResultEntry.objects.filter(student=student, term=term).select_related("subject")
         psychomotor_ratings = PsychomotorRating.objects.filter(
             student=student, term=term
@@ -692,7 +661,7 @@ class StaffResultPrintView(View):
         })
 
 
-@method_decorator(staff_member_required, name="dispatch")
+@method_decorator(it_staff_required, name="dispatch")
 class StaffClassResultsPrintView(View):
     """
     Every active student's result sheet in a class, for one term, stacked
@@ -702,39 +671,57 @@ class StaffClassResultsPrintView(View):
     template_name = "results/staff/class_results_print.html"
 
     def get(self, request):
-        term_id = request.GET.get("term")
-        classroom_id = request.GET.get("classroom")
+        form = StaffDashboardFilterForm(request.GET or None)
+        if not request.GET or not form.is_valid():
+            return render(request, self.template_name, {"form": form, "sheets": []})
 
-        if not term_id or not classroom_id:
-            return render(request, self.template_name, {"form": MasterSheetForm()})
+        session_id = form.cleaned_data.get("session")
+        term_id = form.cleaned_data.get("term")
+        classroom_id = form.cleaned_data.get("classroom")
+        if not session_id or not term_id or not classroom_id:
+            form.add_error(None, "Select a class, academic session, and term to print class results.")
+            return render(request, self.template_name, {"form": form, "sheets": []})
 
-        term = Term.objects.get(pk=term_id)
-        classroom = ClassRoom.objects.get(pk=classroom_id)
-        students = list(classroom.students.filter(is_active=True).order_by("last_name", "first_name"))
+        term = get_object_or_404(Term, pk=term_id, session_id=session_id)
+        classroom = get_object_or_404(ClassRoom, pk=classroom_id)
+        students = classroom.students.filter(
+            is_active=True,
+            term_results__term=term,
+            term_results__is_blocked=False,
+        ).distinct().order_by("last_name", "first_name").prefetch_related(
+            Prefetch(
+                "term_results",
+                queryset=TermResult.objects.filter(term=term, is_blocked=False),
+                to_attr="selected_term_results",
+            ),
+            Prefetch(
+                "result_entries",
+                queryset=ResultEntry.objects.filter(term=term).select_related("subject"),
+                to_attr="selected_result_entries",
+            ),
+            Prefetch(
+                "psychomotor_ratings",
+                queryset=PsychomotorRating.objects.filter(term=term).select_related("skill"),
+                to_attr="selected_psychomotor_ratings",
+            ),
+        )
 
-        sheets = []
-        for student in students:
-            term_result = TermResult.objects.filter(student=student, term=term).first()
-            result_entries = ResultEntry.objects.filter(student=student, term=term).select_related("subject")
-            psychomotor_ratings = PsychomotorRating.objects.filter(
-                student=student, term=term
-            ).select_related("skill")
-            sheets.append({
-                "student": student,
-                "term_result": term_result,
-                "result_entries": result_entries,
-                "psychomotor_ratings": psychomotor_ratings,
-            })
+        sheets = [{
+            "student": student,
+            "term_result": student.selected_term_results[0],
+            "result_entries": student.selected_result_entries,
+            "psychomotor_ratings": student.selected_psychomotor_ratings,
+        } for student in students]
 
         return render(request, self.template_name, {
-            "form": MasterSheetForm(initial={"term": term_id, "classroom": classroom_id}),
+            "form": form,
             "term": term,
             "classroom": classroom,
             "sheets": sheets,
         })
 
 
-@method_decorator(staff_member_required, name="dispatch")
+@method_decorator(it_staff_required, name="dispatch")
 class PromotionResultView(View):
     """
     Prints promotion results (cumulative annual data) for each student in a class

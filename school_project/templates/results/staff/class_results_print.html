@@ -15,6 +15,7 @@
 <section class="section no-print">
     <div class="container">
         <form method="get" class="site-form site-form--inline">
+            {% include "partials/form_field.html" with field=form.session %}
             {% include "partials/form_field.html" with field=form.term %}
             {% include "partials/form_field.html" with field=form.classroom %}
             <button type="submit" class="btn btn--accent">Generate</button>
@@ -22,7 +23,7 @@
 
         {% if sheets %}
         <div class="master-sheet-actions">
-            <button type="button" class="btn btn--outline-dark" onclick="window.print()">Print All ({{ sheets|length }} students)</button>
+            <button type="button" class="btn btn--outline-dark" onclick="if (confirm('Print result sheets for all {{ sheets|length }} students?')) window.print();">Print All ({{ sheets|length }} students)</button>
             <a href="{% url 'results:master_sheet' %}?term={{ term.id }}&classroom={{ classroom.id }}" class="btn btn--outline-dark">View Master Sheet Instead</a>
         </div>
         {% endif %}

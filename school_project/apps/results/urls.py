@@ -5,6 +5,10 @@ from . import views
 app_name = "results"
 
 urlpatterns = [
+    path("staff/login/", views.StaffLoginView.as_view(), name="staff_login"),
+    path("staff/logout/", views.StaffLogoutView.as_view(), name="staff_logout"),
+    path("staff/dashboard/", views.StaffDashboardView.as_view(), name="staff_dashboard"),
+    path("staff/access-denied/", views.StaffAccessDeniedView.as_view(), name="access_denied"),
     path("staff/upload-scores/", views.ScoreUploadView.as_view(), name="upload_scores"),
     path("staff/upload-workbook/", views.WorkbookUploadView.as_view(), name="upload_workbook"),
     path("staff/master-sheet/", views.MasterSheetView.as_view(), name="master_sheet"),

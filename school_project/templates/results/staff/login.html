@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block title %}Staff Login — {{ school_info.school_name }}{% endblock %}
+
+{% block extra_css %}
+<link rel="stylesheet" href="{% static 'css/it-dashboard.css' %}">
+{% endblock %}
+
+{% block content %}
+<section class="staff-login-wrap">
+    <div class="staff-login-panel">
+        <p class="eyebrow">Mater Domini School</p>
+        <h1>Staff Login</h1>
+        <p>Sign in with your authorised staff account to access student results.</p>
+        {% if form.non_field_errors %}
+            {% for error in form.non_field_errors %}<p class="alert alert--error" role="alert">{{ error }}</p>{% endfor %}
+        {% endif %}
+        <form method="post" class="staff-login-form">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <div>
+                <label for="{{ form.username.id_for_label }}">Username</label>
+                {{ form.username }}
+                {% for error in form.username.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <div>
+                <label for="{{ form.password.id_for_label }}">Password</label>
+                {{ form.password }}
+                {% for error in form.password.errors %}<p class="staff-filter-errors">{{ error }}</p>{% endfor %}
+            </div>
+            <button type="submit" class="btn btn--accent">Sign in</button>
+        </form>
+    </div>
+</section>
+{% endblock %}

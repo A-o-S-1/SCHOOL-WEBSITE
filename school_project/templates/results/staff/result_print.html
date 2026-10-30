@@ -4,7 +4,7 @@
 {% block title %}{% if student %}{{ student.full_name }} — {% endif %}Print Result — Staff Tools{% endblock %}
 
 {% block content %}
-<section class="page-hero">
+<section class="page-hero no-print">
     <div class="container">
         <p class="eyebrow">Staff Tools</p>
         <h1>Print Individual Result</h1>
@@ -18,7 +18,7 @@
         {% else %}
         {% include "partials/result_sheet.html" %}
 
-        <div class="result-actions">
+        <div class="result-actions no-print">
             <button onclick="window.print()" class="btn btn--outline-dark">Print This Result</button>
             <a href="{% url 'results:master_sheet' %}" class="btn btn--accent">Back to Staff Tools</a>
         </div>
